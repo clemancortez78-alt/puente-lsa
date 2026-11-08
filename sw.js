@@ -1,6 +1,6 @@
 // Guarda la app, la librería y el modelo de manos para que abra rápido y funcione sin conexión
 // (el dictado por voz igual puede necesitar internet según el celular).
-const CACHE = "puente-lsa-v1";
+const CACHE = "puente-lsa-v2";
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.json", "./icons/icon-192.png", "./icons/icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", (e) => {

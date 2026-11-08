@@ -17,8 +17,8 @@ const T = 6;                     // cuadros por muestra (secuencia remuestreada)
 const WIN_MS = 1000;             // ventana temporal de una seña
 const PRES_W = 2.0;              // peso de "hay mano / no hay mano"
 const POS_W = 4.0;               // peso de la posición de la mano en la imagen
-const EVAL_MS = 120;             // cada cuánto se evalúa
-const STABLE_N = 4;              // evaluaciones seguidas iguales para aceptar
+const EVAL_MS = 100;             // cada cuánto se evalúa
+const STABLE_N = 3;              // evaluaciones seguidas iguales para aceptar
 const COOLDOWN_MS = 900;
 const REPEAT_MS = 2500;          // misma seña repetida sin bajar las manos
 const K = 3;
@@ -34,7 +34,7 @@ const els = {
   live: $("live"), btnMic: $("btnMic"), btnBig: $("btnBig"), hearForm: $("hearForm"), hearText: $("hearText"),
   log: $("log"), btnClearLog: $("btnClearLog"),
   addForm: $("addForm"), newSign: $("newSign"), signList: $("signList"),
-  nSamples: $("nSamples"), nSamplesVal: $("nSamplesVal"), sens: $("sens"), sensVal: $("sensVal"), autoSend: $("autoSend"),
+  nSamples: $("nSamples"), nSamplesVal: $("nSamplesVal"), sens: $("sens"), sensVal: $("sensVal"), autoSend: $("autoSend"), speakWords: $("speakWords"),
   btnExport: $("btnExport"), fileImport: $("fileImport"),
   bigOverlay: $("bigOverlay"), bigText: $("bigText"), btnRotate: $("btnRotate"), btnBigMic: $("btnBigMic"), btnBigClose: $("btnBigClose"),
   dialog: $("dialog"), dialogText: $("dialogText"), dialogYes: $("dialogYes"), dialogNo: $("dialogNo"), toast: $("toast"),
@@ -49,7 +49,7 @@ const QUICK_PHRASES = ["Hola", "Gracias", "Soy sordo/a", "No entiendo", "¿Podé
 const state = {
   signs: [],            // {id, label, samples: [number[]]}
   thresholds: new Map(),// id -> umbral
-  settings: { nSamples: 10, sens: 1, autoSend: true },
+  settings: { nSamples: 10, sens: 1, autoSend: true, speakWords: true },
   sentence: [],
   log: [],
   landmarker: null, stream: null, facing: "user", running: false,
@@ -291,12 +291,12 @@ function signById(id) { return state.signs.find((s) => s.id === id); }
 function recognize(now) {
   const trained = state.signs.filter((s) => s.samples.length);
   if (!trained.length) { els.pred.classList.add("hidden"); return; }
+  maybeAutoSend(now);
   const w = windowVector(state.buffer, now);
   if (!w || w.ratio < 0.6) {
     if (!w || w.ratio < 0.2) state.lastEmitted = null; // bajó las manos: permite repetir
     state.stable = { id: null, n: 0 };
     els.pred.classList.add("hidden");
-    maybeAutoSend(now);
     return;
   }
   const p = classify(w.vec, trained, state.thresholds, state.settings.sens);
@@ -322,14 +322,22 @@ function renderSentence(animateLast) {
   els.sentence.innerHTML = state.sentence.map((w, i) =>
     `<span class="word"${animateLast && i === state.sentence.length - 1 ? "" : ' style="animation:none"'}>${esc(w)}</span>`).join("");
 }
-function addWord(w) { state.sentence.push(w); state.lastWordTime = performance.now(); renderSentence(true); }
-function maybeAutoSend(now) {
-  if (state.settings.autoSend && state.sentence.length && now - state.lastWordTime > 3000) sendSentence();
+function addWord(w) {
+  state.sentence.push(w); state.lastWordTime = performance.now(); renderSentence(true);
+  if (state.settings.speakWords) speak(w, true); // se escucha apenas se reconoce
 }
-function sendSentence() {
+const PAUSE_MS = 2000;
+function maybeAutoSend(now) {
+  if (state.settings.autoSend && state.sentence.length && now - state.lastWordTime > PAUSE_MS) {
+    // si cada palabra ya se dijo, la frase solo pasa a la conversación (no se repite en voz alta)
+    sendSentence(state.settings.speakWords);
+  }
+}
+function sendSentence(silent) {
   const text = state.sentence.join(" ").trim();
   if (!text) { toast("Todavía no hay una frase para decir."); return; }
-  speak(text); addLog("deaf", text);
+  if (silent !== true) speak(text);
+  addLog("deaf", text);
   state.sentence = []; renderSentence();
 }
 
@@ -341,12 +349,22 @@ function pickVoice() {
           vs.find((v) => v.lang?.startsWith("es-419")) || vs.find((v) => v.lang?.startsWith("es")) || null;
 }
 if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
-function speak(text) {
+// iPhone y algunos Android no dejan hablar hasta un primer toque: "despertamos" la voz en silencio.
+let speechUnlocked = false;
+function unlockSpeech() {
+  if (speechUnlocked || !("speechSynthesis" in window)) return;
+  speechUnlocked = true;
+  try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } catch {}
+}
+document.addEventListener("pointerdown", unlockSpeech, { once: true, capture: true });
+function speak(text, queue) {
   if (!("speechSynthesis" in window)) { toast("Este dispositivo no puede leer en voz alta."); return; }
   try {
-    speechSynthesis.cancel();
+    if (!voice) pickVoice();
+    if (!queue) speechSynthesis.cancel();
+    if (speechSynthesis.paused) speechSynthesis.resume();
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = voice?.lang || "es-AR"; if (voice) u.voice = voice; u.rate = 0.95;
+    u.lang = voice?.lang || "es-AR"; if (voice) u.voice = voice; u.rate = 1;
     speechSynthesis.speak(u);
   } catch (e) { console.warn(e); }
 }
@@ -514,7 +532,7 @@ function bindUI() {
   els.btnFlip.onclick = () => { state.facing = state.facing === "user" ? "environment" : "user"; if (state.running) startCamera(); else toast(state.facing === "user" ? "Cámara frontal" : "Cámara trasera"); };
   els.btnUndo.onclick = () => { state.sentence.pop(); renderSentence(); };
   els.btnClear.onclick = () => { state.sentence = []; renderSentence(); };
-  els.btnSend.onclick = sendSentence;
+  els.btnSend.onclick = () => sendSentence(false);
   els.quick.innerHTML = QUICK_PHRASES.map((p) => `<button class="btn" type="button">${esc(p)}</button>`).join("");
   els.quick.onclick = (e) => { const b = e.target.closest("button"); if (b) { speak(b.textContent); addLog("deaf", b.textContent); } };
   els.deafForm.onsubmit = (e) => { e.preventDefault(); const t = els.deafText.value.trim(); if (t) { speak(t); addLog("deaf", t); els.deafText.value = ""; } };
@@ -540,12 +558,13 @@ function bindUI() {
         state.signs = state.signs.filter((x) => x.id !== id); state.thresholds = computeThresholds(state.signs); saveSigns(); renderSigns();
       }
     } else if (b.dataset.act === "test") {
-      document.querySelector('.tab[data-view="talk"]').click(); toast(`Hacé la seña “${s.label}” para probarla.`);
+      speak(s.label); document.querySelector('.tab[data-view="talk"]').click(); toast(`Hacé la seña “${s.label}” para probarla.`);
     }
   };
   els.nSamples.oninput = () => { state.settings.nSamples = +els.nSamples.value; els.nSamplesVal.textContent = els.nSamples.value; saveSettings(); };
   els.sens.oninput = () => { state.settings.sens = +els.sens.value; els.sensVal.textContent = sensLabel(state.settings.sens); saveSettings(); };
   els.autoSend.onchange = () => { state.settings.autoSend = els.autoSend.checked; saveSettings(); };
+  els.speakWords.onchange = () => { state.settings.speakWords = els.speakWords.checked; saveSettings(); };
   els.btnExport.onclick = exportData;
   els.fileImport.onchange = () => { const f = els.fileImport.files[0]; if (f) importData(f); els.fileImport.value = ""; };
   document.addEventListener("visibilitychange", () => { if (document.hidden && mic.on) stopMic(); });
@@ -562,6 +581,7 @@ async function init() {
   els.nSamples.value = state.settings.nSamples; els.nSamplesVal.textContent = state.settings.nSamples;
   els.sens.value = state.settings.sens; els.sensVal.textContent = sensLabel(state.settings.sens);
   els.autoSend.checked = state.settings.autoSend;
+  els.speakWords.checked = state.settings.speakWords;
   state.thresholds = computeThresholds(state.signs);
   renderSigns(); renderLog(); renderSentence();
   setStatus("Cámara apagada");
